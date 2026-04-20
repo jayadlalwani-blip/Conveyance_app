@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import zipfile, io, re, os
 from PIL import Image
-import pytesseract
+import base64
+from openai import OpenAI
 from datetime import datetime
 
 st.set_page_config(page_title='Monthly Conveyance Processor', layout='wide')
@@ -17,8 +18,21 @@ def is_office(loc:str):
 
 def extract_text(img):
     try:
-        return pytesseract.image_to_string(img)
-    except:
+        client = OpenAI(api_key=st.secrets['OPENAI_API_KEY'])
+        buf = io.BytesIO(); img.save(buf, format='PNG')
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        resp = client.responses.create(
+            model='gpt-4.1-mini',
+            input=[{
+                'role':'user',
+                'content':[
+                    {'type':'input_text','text':'Extract ride receipt details: date, time, from, to, fare. Return plain text.'},
+                    {'type':'input_image','image_url':f'data:image/png;base64,{b64}'}
+                ]
+            }]
+        )
+        return resp.output_text
+    except Exception as e:
         return ''
 
 def find(pattern, text, flags=0):
