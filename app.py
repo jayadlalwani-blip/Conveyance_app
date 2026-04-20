@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import zipfile, io, re, os, json, base64
+import zipfile, io, json, base64
 from PIL import Image
 from datetime import datetime
 from openai import OpenAI
@@ -14,8 +14,17 @@ OFFICE_KEYS = ["altimus", "pandurang budhkar", "century", "worli"]
 
 
 def is_office(loc):
-    t = (loc or "").lower()
-    return any(k in t for k in OFFICE_KEYS)
+    text = (loc or "").lower()
+    return any(k in text for k in OFFICE_KEYS)
+
+
+def safe_time_flag(time_text):
+    try:
+        t = datetime.strptime(time_text.upper().replace(" ", ""), "%I:%M%p")
+        cut = datetime.strptime("09:30PM", "%I:%M%p")
+        return "Yes" if t < cut else "No"
+    except Exception:
+        return ""
 
 
 def extract_receipt_data(img):
@@ -29,7 +38,7 @@ def extract_receipt_data(img):
         prompt = """
 Read this Uber or Rapido ride receipt screenshot.
 
-Return ONLY valid JSON in this exact format:
+Return ONLY JSON in this exact format:
 {
   "date": "",
   "time": "",
@@ -41,10 +50,10 @@ Return ONLY valid JSON in this exact format:
 Rules:
 - Use DD-MM-YYYY for date
 - Keep time exactly as visible
-- Extract full pickup location
-- Extract full drop location
+- Extract pickup location
+- Extract drop location
 - Fare should be numeric only
-- If any field missing, leave blank
+- If missing, leave blank
 """
 
         response = client.responses.create(
@@ -63,10 +72,17 @@ Rules:
             ],
         )
 
-        txt = response.output_text.strip()
-        return json.loads(txt)
+        raw = response.output_text
+        st.write("AI Raw Output:", raw)
 
-    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        cleaned = raw[start:end]
+
+        return json.loads(cleaned)
+
+    except Exception as e:
+        st.error(f"Extraction Error: {str(e)}")
         return {
             "date": "",
             "time": "",
@@ -74,15 +90,6 @@ Rules:
             "to": "",
             "fare": "",
         }
-
-
-def safe_time_flag(time_text):
-    try:
-        t = datetime.strptime(time_text.upper().replace(" ", ""), "%I:%M%p")
-        cut = datetime.strptime("09:30PM", "%I:%M%p")
-        return "Yes" if t < cut else "No"
-    except Exception:
-        return ""
 
 
 uploads = st.file_uploader(
@@ -129,18 +136,18 @@ if st.button("Process") and uploads:
 
                 file_name = f"{base_date}{suffix}.png"
 
-                row = {
-                    "File Name": file_name,
-                    "Date": date_val,
-                    "Time": time_val,
-                    "From": from_val,
-                    "To": to_val,
-                    "Fare": fare_val,
-                    "Office Pickup": "Yes" if is_office(from_val) else "No",
-                    "Left Before 9:30 PM": safe_time_flag(time_val),
-                }
-
-                rows.append(row)
+                rows.append(
+                    {
+                        "File Name": file_name,
+                        "Date": date_val,
+                        "Time": time_val,
+                        "From": from_val,
+                        "To": to_val,
+                        "Fare": fare_val,
+                        "Office Pickup": "Yes" if is_office(from_val) else "No",
+                        "Left Before 9:30 PM": safe_time_flag(time_val),
+                    }
+                )
 
                 img_buf = io.BytesIO()
                 img.save(img_buf, format="PNG")
