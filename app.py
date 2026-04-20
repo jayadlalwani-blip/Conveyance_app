@@ -1,16 +1,15 @@
 import streamlit as st
 import pandas as pd
-import zipfile, io, json, base64
+import zipfile, io, re, requests
 from PIL import Image
 from datetime import datetime
-from openai import OpenAI
 
 st.set_page_config(page_title="Monthly Conveyance Processor", layout="wide")
 
-st.title("Monthly Conveyance Processor")
-st.caption("Upload screenshots or ZIP, process receipts, download Excel + ZIP")
-
 OFFICE_KEYS = ["altimus", "pandurang budhkar", "century", "worli"]
+
+st.title("Monthly Conveyance Processor")
+st.caption("Free version using OCR.space")
 
 
 def is_office(loc):
@@ -23,164 +22,107 @@ def safe_time_flag(time_text):
         t = datetime.strptime(time_text.upper().replace(" ", ""), "%I:%M%p")
         cut = datetime.strptime("09:30PM", "%I:%M%p")
         return "Yes" if t < cut else "No"
-    except Exception:
+    except:
         return ""
 
 
-def extract_receipt_data(img):
+def extract_text_ocrspace(img):
     try:
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode()
+        files = {"filename": ("image.png", buf.getvalue())}
 
-        prompt = """
-Read this Uber or Rapido ride receipt screenshot.
-
-Return ONLY JSON in this exact format:
-{
-  "date": "",
-  "time": "",
-  "from": "",
-  "to": "",
-  "fare": ""
-}
-
-Rules:
-- Use DD-MM-YYYY for date
-- Keep time exactly as visible
-- Extract pickup location
-- Extract drop location
-- Fare should be numeric only
-- If missing, leave blank
-"""
-
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{b64}",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        raw = response.output_text
-        st.write("AI Raw Output:", raw)
-
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        cleaned = raw[start:end]
-
-        return json.loads(cleaned)
-
-    except Exception as e:
-        st.error(f"Extraction Error: {str(e)}")
-        return {
-            "date": "",
-            "time": "",
-            "from": "",
-            "to": "",
-            "fare": "",
+        payload = {
+            "apikey": "helloworld",
+            "language": "eng",
+            "isOverlayRequired": False
         }
+
+        r = requests.post(
+            "https://api.ocr.space/parse/image",
+            files=files,
+            data=payload,
+            timeout=60
+        ).json()
+
+        return r["ParsedResults"][0]["ParsedText"]
+    except:
+        return ""
+
+
+def parse_text(text):
+    date = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', text)
+    time = re.search(r'(\d{1,2}:\d{2}\s?(AM|PM))', text, re.I)
+    fare = re.search(r'(Rs\.?\s?[\d,.]+)', text, re.I)
+
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    frm = lines[0] if len(lines) > 0 else ""
+    to = lines[1] if len(lines) > 1 else ""
+
+    return {
+        "Date": date.group(1) if date else "",
+        "Time": time.group(1) if time else "",
+        "From": frm,
+        "To": to,
+        "Fare": fare.group(1) if fare else ""
+    }
 
 
 uploads = st.file_uploader(
     "Upload images or ZIP",
     type=["png", "jpg", "jpeg", "zip"],
-    accept_multiple_files=True,
+    accept_multiple_files=True
 )
 
 if st.button("Process") and uploads:
     rows = []
-    used_dates = {}
+    used = {}
     outzip = io.BytesIO()
 
     with zipfile.ZipFile(outzip, "w", zipfile.ZIP_DEFLATED) as zout:
-
         for up in uploads:
             files = []
 
             if up.name.lower().endswith(".zip"):
                 with zipfile.ZipFile(up) as z:
-                    for name in z.namelist():
-                        if name.lower().endswith((".png", ".jpg", ".jpeg")):
-                            files.append((name, z.read(name)))
+                    for n in z.namelist():
+                        if n.lower().endswith((".png", ".jpg", ".jpeg")):
+                            files.append((n, z.read(n)))
             else:
                 files.append((up.name, up.read()))
 
-            for original_name, data in files:
-                try:
-                    img = Image.open(io.BytesIO(data)).convert("RGB")
-                except Exception:
-                    continue
+            for name, data in files:
+                img = Image.open(io.BytesIO(data)).convert("RGB")
+                text = extract_text_ocrspace(img)
+                rec = parse_text(text)
 
-                data_json = extract_receipt_data(img)
+                d = rec["Date"] or "UnknownDate"
+                used[d] = used.get(d, 0) + 1
+                suffix = "" if used[d] == 1 else f"_{used[d]}"
+                newname = f"{d}{suffix}.png"
 
-                date_val = data_json.get("date", "").strip()
-                time_val = data_json.get("time", "").strip()
-                from_val = data_json.get("from", "").strip()
-                to_val = data_json.get("to", "").strip()
-                fare_val = data_json.get("fare", "").strip()
+                rows.append({
+                    "File Name": newname,
+                    **rec,
+                    "Office Pickup": "Yes" if is_office(rec["From"]) else "No",
+                    "Left Before 9:30 PM": safe_time_flag(rec["Time"])
+                })
 
-                base_date = date_val if date_val else "UnknownDate"
-                used_dates[base_date] = used_dates.get(base_date, 0) + 1
-                suffix = "" if used_dates[base_date] == 1 else f"_{used_dates[base_date]}"
-
-                file_name = f"{base_date}{suffix}.png"
-
-                rows.append(
-                    {
-                        "File Name": file_name,
-                        "Date": date_val,
-                        "Time": time_val,
-                        "From": from_val,
-                        "To": to_val,
-                        "Fare": fare_val,
-                        "Office Pickup": "Yes" if is_office(from_val) else "No",
-                        "Left Before 9:30 PM": safe_time_flag(time_val),
-                    }
-                )
-
-                img_buf = io.BytesIO()
-                img.save(img_buf, format="PNG")
-                zout.writestr("Bills/" + file_name, img_buf.getvalue())
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                zout.writestr("Bills/" + newname, buf.getvalue())
 
         df = pd.DataFrame(rows)
+        excel = io.BytesIO()
+        with pd.ExcelWriter(excel, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False)
 
-        if not df.empty:
-            df = df[
-                [
-                    "File Name",
-                    "Date",
-                    "Time",
-                    "From",
-                    "To",
-                    "Fare",
-                    "Office Pickup",
-                    "Left Before 9:30 PM",
-                ]
-            ]
+        zout.writestr("Conveyance_Summary.xlsx", excel.getvalue())
 
-        excel_buf = io.BytesIO()
-        with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Summary")
-
-        zout.writestr("Conveyance_Summary.xlsx", excel_buf.getvalue())
-
-    st.success("Processing complete")
     st.dataframe(df, use_container_width=True)
-
     st.download_button(
         "Download Final ZIP",
         outzip.getvalue(),
-        file_name="Conveyance_Output.zip",
-        mime="application/zip",
+        "Conveyance_Output.zip",
+        "application/zip"
     )
